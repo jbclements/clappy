@@ -57,57 +57,7 @@
                          '("a" "bc" "def" "c" "ghi" "j"))
                 "ghi"))
 
-(define fad-names (id->fad-names (string->symbol instructor-id)))
-(define fad-name
-  (match fad-names
-    [(list fn) fn]
-    [other (error 'fad-name "expected exactly one hit, got: ~e" other)]))
 
-;; because of cross-listings, we have to look in many different places
-;; for the offerings of this course; it may be that this course was cross-listed
-;; in one catalog but not in another, for instance.
-(define mappings
-  (map
-   (λ (row)
-     (match-define (vector cc subj 3num) row)
-     (list cc subj (string-append "0" 3num)))
-   (query-rows
-    scheduling-conn
-    "SELECT cycle,subject,num FROM course_mappings WHERE id=$1"
-    (hash-ref query-datum 'course))))
-
-;; if this is slow, optimize it by making only one db query...
-;; (listof (vector qtr section)
-#;(apply
- append
- (for/list ([m (in-list mappings)])
-   (match-define (vector cc subj num _) m)
-   ;; making the bold assumption that these quarters are uninterrupted...
-   (define cc-qtrs (catalog-cycle->qtrs cc))
-   (define min-qtr (apply min cc-qtrs))
-   (define max-qtr (apply max cc-qtrs))
-   (query-rows
-    fad-conn
-    (~a "SELECT qtr,section FROM offerfacs WHERE instructor = $1 AND subject=$2 AND num=$3 "
-        " AND qtr >= $4 AND qtr <= $5;")
-    fad-name
-    subj (~a "0" num)
-    min-qtr max-qtr
-    )))
-
-
-(define rows
-  (query-rows
-   fad-conn
-   "SELECT qtr,subject,num,section FROM offerfacs WHERE instructor = $1;"
-   fad-name))
-
-(define course-offering-rows
-  (filter
-   (λ (row)
-     (match-define (vector qtr subj num _) row)
-     (set-member? mappings (list (qtr->catalog-cycle qtr) subj num)))
-   rows))
 
 (define enrolls
   (time
@@ -130,6 +80,40 @@
 
 ;; check that the fad and the enrolls database come up with the same sections.
 (let ()
+  ;; fad checking is more or less superfluous, I believe, except as a check.
+  (define fad-names (id->fad-names (string->symbol instructor-id)))
+  (define fad-name
+    (match fad-names
+      [(list fn) fn]
+      [other (error 'fad-name "expected exactly one hit, got: ~e" other)]))
+
+  ;; because of cross-listings, we have to look in many different places
+  ;; for the offerings of this course; it may be that this course was cross-listed
+  ;; in one catalog but not in another, for instance.
+  (define mappings
+    (map
+     (λ (row)
+       (match-define (vector cc subj 3num) row)
+       (list cc subj (string-append "0" 3num)))
+     (query-rows
+      scheduling-conn
+      "SELECT cycle,subject,num FROM course_mappings WHERE id=$1"
+      (hash-ref query-datum 'course))))
+
+
+  (define rows
+    (query-rows
+     fad-conn
+     "SELECT qtr,subject,num,section FROM offerfacs WHERE instructor = $1;"
+     fad-name))
+
+  (define fad-course-offering-rows
+    (filter
+     (λ (row)
+       (match-define (vector qtr subj num _) row)
+       (set-member? mappings (list (qtr->catalog-cycle qtr) subj num)))
+     rows))
+  
   (define grouped (group-by enroll-key enrolls))
   (define tallys-from-progress-db
     (map (λ (g) (list (enroll-key (first g))
@@ -140,11 +124,11 @@
      (map (λ (row)
             (match-define (vector qtr subj num section) row)
             (list qtr section))
-          course-offering-rows)))
+          fad-course-offering-rows)))
   (unless (set-equal? (set-subtract fad-offerings (list->set (map first tallys-from-progress-db))))
     (error 'abc)))
 
-start-transaction
+
 
 
 ;; ooh... just do it all on the DB side, in one query?
@@ -211,6 +195,46 @@ start-transaction
 (printf "~v recorded enrolled-gradeds, only CSC/CPE/EE majors[*], counting repeats n times\n"
         (length oneversion-self-check-data))
 
+(define students
+  (list->set (map pq-student oneversion-self-check-data)))
+
+(printf "~v students in this set\n"
+        (set-count students))
+
+;; we want to eliminate students that took the source course again from another
+;; instructor.
+
+;; first, we need a quick map of student/qtr. We're assuming here that
+;; students can't take the course twice in the same quarter from different instructors.
+;; this would be a problem if the lab (say) had a different instructor. Since
+;; these are src-qtr, they took the course from the correct instructor
+
+(define qtr/student-pairs
+  (list->set
+   (map (λ (pq) (list (pq-src-qtr pq) (pq-student pq)))
+        oneversion-self-check-data)))
+
+
+
+;; which students did not take the source course again later from another instructor?
+(define non-last-takers
+  (list->set
+   (map
+    pq-student
+    (filter
+     (λ (pq) (and (< (pq-src-qtr pq) (pq-tgt-qtr pq))
+                  (not (set-member? (list (pq-tgt-qtr pq) (pq-student pq))
+                                    qtr/student-pairs))))
+     oneversion-self-check-data))))
+
+(define last-takers
+  (set-subtract students non-last-takers))
+
+(printf "~v students after eliminating those who took it again later from another instructor\n"
+        (set-count last-takers))
+
+
+
 (printf "should we only count people that got passing grades from this instructor?\n")
 
 (define paired-check-data
@@ -223,18 +247,22 @@ start-transaction
    target-course-id
    )))
 
-;; ooh, let's discard those who took the target course *before* taking the source course
-(define-values (not-later-taken later-taken)
-  (partition (λ (pq) (<= (pq-tgt-qtr pq) (pq-src-qtr pq)))
-             paired-check-data))
-
 (define oneversion-paired-check-data
-  (collapse-pq-rows later-taken))
+  (collapse-pq-rows paired-check-data))
 
 (printf "~v recorded enrolled-grades in later course, only majors, counting repeats n times\n"
         (length oneversion-paired-check-data))
 
-;; okay now lets reduce by id, tgt-qtr
+;; ooh, let's discard those who took the target course *before* taking the source course
+(define-values (not-later-taken later-taken)
+  (partition (λ (pq) (<= (pq-tgt-qtr pq) (pq-src-qtr pq)))
+             oneversion-paired-check-data))
+
+(printf "discarding ~v rows from enrollments in the tgt course that didn't happen after the source course."
+        (length not-later-taken))
+
+;; okay now lets reduce by id, tgt-qtr (necessary to eliminate repeat-grades and also not
+;; to double-count people who took the source course twice from the same instructor
 (define (pq-key-2 row) (list (pq-student row) (pq-tgt-qtr row)))
 (define (collapse-pq-rows-2 pq-rows)
   ;; collapse over versions, choose the most recent version if necessary
@@ -252,6 +280,10 @@ start-transaction
                     (map pq-grade g)
                     (pq-grade latest))
            (list (pq-tgt-qtr (first g) (pq-grade (first g))))])))
+
+;; just collapsing all quarters together for now:
+(frequency-hash
+ (map second (collapse-pq-rows-2 later-taken)))
 
 (map
  (λ (g)
