@@ -1,0 +1,6 @@
+This information draws on several sources, each with interesting and overlapping limitations.
+
+Enrollment data starts in 2178, and is relatively complete since then.
+This data provides a mapping from instructor/section to (hashed) student
+id.
+
