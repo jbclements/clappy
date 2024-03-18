@@ -6,16 +6,20 @@
          racket/match
          racket/format
          csse-scheduling/qtr-math
-         sugar)
+         sugar
+         json)
 
 (define fad-conn (make-connection "fad"))
 (define scheduling-conn (make-connection "scheduling"))
 (define progress-conn (make-connection "csseprogress"))
 
 (define query-datum
-  (hash 'instructor "ayaank"
+  #;(hash 'instructor "ayaank"
         'course "csc203"
-        'target-course "csc357"))
+        'target-course "csc357")
+  (hash 'instructor "clements"
+        'course "csc202"
+        'target-course "csc203"))
 
 (define instructor-id (hash-ref query-datum 'instructor))
 (define course-id (hash-ref query-datum 'course))
@@ -57,7 +61,10 @@
                          '("a" "bc" "def" "c" "ghi" "j"))
                 "ghi"))
 
-
+(define min-enroll-qtr
+  (query-value
+   progress-conn
+   "SELECT MIN(qtr) FROM enroll;"))
 
 (define enrolls
   (time
@@ -104,8 +111,9 @@
   (define rows
     (query-rows
      fad-conn
-     "SELECT qtr,subject,num,section FROM offerfacs WHERE instructor = $1;"
-     fad-name))
+     "SELECT qtr,subject,num,section FROM offerfacs WHERE instructor = $1 AND qtr >= $2;"
+     fad-name
+     min-enroll-qtr))
 
   (define fad-course-offering-rows
     (filter
@@ -113,20 +121,23 @@
        (match-define (vector qtr subj num _) row)
        (set-member? mappings (list (qtr->catalog-cycle qtr) subj num)))
      rows))
-  
-  (define grouped (group-by enroll-key enrolls))
-  (define tallys-from-progress-db
-    (map (λ (g) (list (enroll-key (first g))
-                      (length g)))
-         grouped))
+
+  (define enroll-keys (list->set (map enroll-key enrolls)))
+
   (define fad-offerings
     (list->set
      (map (λ (row)
             (match-define (vector qtr subj num section) row)
             (list qtr section))
           fad-course-offering-rows)))
-  (unless (set-equal? (set-subtract fad-offerings (list->set (map first tallys-from-progress-db))))
-    (error 'abc)))
+
+  
+  (unless (set=? fad-offerings enroll-keys)
+    (eprintf "fad minus enrolls: ~e\n"
+             (set-subtract fad-offerings enroll-keys))
+    (eprintf "enrolls minus fad: ~e\n"
+             (set-subtract enroll-keys fad-offerings))
+    (error 'fad-check "fad-offerings and enroll-keys not the same")))
 
 
 
@@ -234,9 +245,6 @@
         (set-count last-takers))
 
 
-
-(printf "should we only count people that got passing grades from this instructor?\n")
-
 (define paired-check-data
   (time
   (query-rows
@@ -253,13 +261,46 @@
 (printf "~v recorded enrolled-grades in later course, only majors, counting repeats n times\n"
         (length oneversion-paired-check-data))
 
+(define-values (rows-from-last-takers nltrs)
+  (partition
+   (λ (row) (set-member? last-takers (pq-student row)))
+   oneversion-paired-check-data))
+
+(printf "discarding ~v rows from students who took the source course again later.\n"
+        (length nltrs))
+
 ;; ooh, let's discard those who took the target course *before* taking the source course
 (define-values (not-later-taken later-taken)
   (partition (λ (pq) (<= (pq-tgt-qtr pq) (pq-src-qtr pq)))
-             oneversion-paired-check-data))
+             rows-from-last-takers))
 
 (printf "discarding ~v rows from enrollments in the tgt course that didn't happen after the source course."
         (length not-later-taken))
+
+(define tgt-qtrs
+  (list->set (map pq-tgt-qtr later-taken)))
+
+(printf "target quarters: ~v\n" tgt-qtrs)
+
+(define all-target-grades-in-target-qtrs
+  (query-rows
+   progress-conn
+   "SELECT qtr,grade,COUNT(*) FROM course_grade WHERE course=$1 GROUP BY qtr,grade;"
+   target-course-id))
+
+(define all-students-hash
+  (make-immutable-hash
+   (map
+    (λ (g)
+      (cons (string->symbol (vector-ref (first g) 1)) ; grade
+            (apply + (map (λ (r) (vector-ref r 2)) g)) ;; count of those who received the grade
+            ))
+    (group-by
+     (λ (summary-row) (vector-ref summary-row 1))
+     (filter
+      (λ (summary-row)
+        (set-member? tgt-qtrs (vector-ref summary-row 0)))
+      all-target-grades-in-target-qtrs)))))
 
 ;; okay now lets reduce by id, tgt-qtr (necessary to eliminate repeat-grades and also not
 ;; to double-count people who took the source course twice from the same instructor
@@ -281,11 +322,23 @@
                     (pq-grade latest))
            (list (pq-tgt-qtr (first g) (pq-grade (first g))))])))
 
-;; just collapsing all quarters together for now:
-(frequency-hash
- (map second (collapse-pq-rows-2 later-taken)))
+(define id-tgt-qtr-grades
+  (collapse-pq-rows-2 later-taken))
 
-(map
+;; just collapsing all quarters together for now:
+(define your-students-hash
+  (frequency-hash
+   (map string->symbol (map second id-tgt-qtr-grades))))
+
+(displayln
+(jsexpr->string
+ (hash-set
+ (hash-set query-datum
+           'your-students your-students-hash)
+ 'all-students all-students-hash)))
+
+;; separated by quarter
+#;(map
  (λ (g)
    (list (first (first g))
          (frequency-hash (map second g))))
