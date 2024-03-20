@@ -6,6 +6,7 @@
          racket/match
          racket/format
          csse-scheduling/qtr-math
+         csse-scheduling/canonicalize
          sugar
          json)
 
@@ -14,12 +15,12 @@
 (define progress-conn (make-connection "csseprogress"))
 
 (define query-datum
-  #;(hash 'instructor "ayaank"
-        'course "csc203"
-        'target-course "csc357")
-  (hash 'instructor "clements"
+  (hash 'instructor "cesiu"
         'course "csc202"
-        'target-course "csc203"))
+        'target-course "csc357")
+  #;(hash 'instructor "clements"
+        'course "csc430"
+        'target-course "csc445"))
 
 (define instructor-id (hash-ref query-datum 'instructor))
 (define course-id (hash-ref query-datum 'course))
@@ -94,20 +95,6 @@
       [(list fn) fn]
       [other (error 'fad-name "expected exactly one hit, got: ~e" other)]))
 
-  ;; because of cross-listings, we have to look in many different places
-  ;; for the offerings of this course; it may be that this course was cross-listed
-  ;; in one catalog but not in another, for instance.
-  (define mappings
-    (map
-     (λ (row)
-       (match-define (vector cc subj 3num) row)
-       (list cc subj (string-append "0" 3num)))
-     (query-rows
-      scheduling-conn
-      "SELECT cycle,subject,num FROM course_mappings WHERE id=$1"
-      (hash-ref query-datum 'course))))
-
-
   (define rows
     (query-rows
      fad-conn
@@ -119,10 +106,16 @@
     (filter
      (λ (row)
        (match-define (vector qtr subj num _) row)
-       (set-member? mappings (list (qtr->catalog-cycle qtr) subj num)))
+       (equal? (canonicalize/qtr qtr subj num) course-id))
      rows))
 
   (define enroll-keys (list->set (map enroll-key enrolls)))
+  (define no-summer-enroll-keys
+    (list->set
+     (filter (λ (enroll-key)
+               (not (equal? (qtr->season (first enroll-key))
+                            "Summer")))
+             (set->list enroll-keys))))
 
   (define fad-offerings
     (list->set
@@ -132,11 +125,11 @@
           fad-course-offering-rows)))
 
   
-  (unless (set=? fad-offerings enroll-keys)
+  (unless (set=? fad-offerings no-summer-enroll-keys)
     (eprintf "fad minus enrolls: ~e\n"
-             (set-subtract fad-offerings enroll-keys))
+             (set-subtract fad-offerings no-summer-enroll-keys))
     (eprintf "enrolls minus fad: ~e\n"
-             (set-subtract enroll-keys fad-offerings))
+             (set-subtract no-summer-enroll-keys fad-offerings))
     (error 'fad-check "fad-offerings and enroll-keys not the same")))
 
 
