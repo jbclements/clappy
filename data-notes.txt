@@ -2,5 +2,8 @@ This information draws on several sources, each with interesting and overlapping
 
 Enrollment data starts in 2178, and is relatively complete since then.
 This data provides a mapping from instructor/section to (hashed) student
-id.
+id. More data is available here, if we want it, and we could probably go back
+quite a bit further. We only currently store this data for 
 
+FAD data starts in 2088, and that's a pretty hard limit, I think that earlier
+FADs are 

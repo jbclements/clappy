@@ -17,6 +17,12 @@
 (define scheduling-conn (make-connection "scheduling"))
 (define progress-conn (make-connection "csseprogress"))
 
-(query-rows
- fad-conn
- "SELECT qtr,course")
+(define all-fad-courses
+  (query-rows
+   fad-conn
+   "SELECT qtr,subject,num,section,enrollment FROM offerings;"))
+
+(define all-enrollment-courses
+  (query-rows
+   progress-con
+   "SELECT qtr,course,COUNT(*)"))
