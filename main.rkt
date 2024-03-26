@@ -323,12 +323,14 @@
   (frequency-hash
    (map string->symbol (map second id-tgt-qtr-grades))))
 
-(displayln
-(jsexpr->string
- (hash-set
- (hash-set query-datum
-           'your-students your-students-hash)
- 'all-students all-students-hash)))
+;; not printing results, don't want to look at them
+(define (display-results)
+  (displayln
+   (jsexpr->string
+    (hash-set
+     (hash-set query-datum
+               'your-students your-students-hash)
+     'all-students all-students-hash))))
 
 ;; separated by quarter
 #;(map
